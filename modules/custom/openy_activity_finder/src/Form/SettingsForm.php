@@ -2,13 +2,53 @@
 
 namespace Drupal\openy_activity_finder\Form;
 
+use Drupal\Core\Cache\CacheBackendInterface;
 use Drupal\Core\Form\ConfigFormBase;
 use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Url;
+use GuzzleHttp\Client;
+use GuzzleHttp\Exception\RequestException;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
  * Settings Form for daxko.
  */
 class SettingsForm extends ConfigFormBase {
+
+  /**
+   * Guzzle Http Client.
+   *
+   * @var GuzzleHttp\Client
+   */
+  protected $httpClient;
+
+  /**
+   * The cache backend.
+   *
+   * @var \Drupal\Core\Cache\CacheBackendInterface
+   */
+  protected $cache;
+
+  /**
+   * Constructs a new Class.
+   *
+   * @param \GuzzleHttp\Client $http_client
+   *   The http_client.
+   */
+  public function __construct(Client $http_client, CacheBackendInterface $cache) {
+    $this->httpClient = $http_client;
+    $this->cache = $cache;
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public static function create(ContainerInterface $container) {
+    return new static(
+      $container->get('http_client'),
+      $container->get('cache.render')
+    );
+  }
 
   /**
    * {@inheritdoc}
@@ -81,6 +121,59 @@ class SettingsForm extends ConfigFormBase {
       '#description' => t('When checked disables Spots Available feature on Results page.'),
     ];
 
+    $form['collapse'] = [
+      '#type' => 'details',
+      '#title' => $this->t('Group collapse settings.'),
+      '#open' => TRUE,
+      '#description' => $this->t('Please select items to show them as Expanded on program search. Default state is collapsed'),
+    ];
+
+    $form['collapse']['schedule'] = [
+      '#type' => 'details',
+      '#title' => $this->t('Schedule preferences'),
+      '#open' => TRUE,
+    ];
+    $options = [
+      'disabled' => $this->t('Disabled'),
+      'enabled_collapsed' => $this->t('Enabled - Collapsed'),
+      'enabled_expanded' => $this->t('Enabled - Expanded'),
+    ];
+
+    $form['collapse']['schedule']['schedule_collapse_group'] = [
+      '#title' => $this->t('Settings for whole group.'),
+      '#type' => 'radios',
+      '#options' => $options,
+      '#default_value' => $config->get('schedule_collapse_group') ? $config->get('schedule_collapse_group') : 'disabled',
+      '#description' => $this->t('Check this if you want default state for whole this group is "Collapsed"'),
+    ];
+
+    $form['collapse']['category'] = [
+      '#type' => 'details',
+      '#title' => $this->t('Activity preferences'),
+      '#open' => TRUE,
+    ];
+    $form['collapse']['category']['category_collapse_group'] = [
+      '#title' => $this->t('Settings for whole group.'),
+      '#type' => 'radios',
+      '#options' => $options,
+      '#default_value' => $config->get('category_collapse_group') ? $config->get('category_collapse_group') : 'disabled',
+      '#description' => $this->t('Check this if you want default state for whole this group is "Collapsed"'),
+    ];
+
+    $form['collapse']['locations'] = [
+      '#type' => 'details',
+      '#title' => $this->t('Location preferences'),
+      '#open' => TRUE,
+    ];
+
+    $form['collapse']['locations']['locations_collapse_group'] = [
+      '#title' => $this->t('Settings for whole group.'),
+      '#type' => 'radios',
+      '#options' => $options,
+      '#default_value' => $config->get('locations_collapse_group') ? $config->get('locations_collapse_group') : 'disabled',
+      '#description' => $this->t('Check this if you want default state for whole this group is "Collapsed"'),
+    ];
+
     return parent::buildForm($form, $form_state);
   }
 
@@ -88,7 +181,7 @@ class SettingsForm extends ConfigFormBase {
    * {@inheritdoc}
    */
   public function submitForm(array &$form, FormStateInterface $form_state) {
-    
+
     $config = $this->config('openy_activity_finder.settings');
 
     $config->set('backend', $form_state->getValue('backend'))->save();
@@ -101,7 +194,38 @@ class SettingsForm extends ConfigFormBase {
 
     $config->set('disable_spots_available', $form_state->getValue('disable_spots_available'))->save();
 
+    $config->set('schedule_collapse_group', $form_state->getValue('schedule_collapse_group'))->save();
+    $config->set('category_collapse_group', $form_state->getValue('category_collapse_group'))->save();
+    $config->set('locations_collapse_group', $form_state->getValue('locations_collapse_group'))->save();
+    $this->cache->deleteAll();
     parent::submitForm($form, $form_state);
   }
 
+  /**
+   * Return Data structure the same as in Program search.
+   * @return array
+   */
+  public function getActivityFinderDataStructure() {
+    $request = $this->getRequest();
+    $component = [];
+    $url = Url::fromRoute('openy_activity_finder.get_results');
+    $base_url = $request->getSchemeAndHttpHost();
+    try {
+      $response = $this->httpClient
+        ->get($base_url . $url->toString());
+      $data = $response->getBody();
+    }
+    catch (RequestException $e) {
+      watchdog_exception('error', $e, $e->getMessage());
+    }
+
+    if ($data) {
+      $data = json_decode($data);
+      $component['facets'] = $data->facets;
+      $component['groupedLocations'] = $data->groupedLocations;
+
+      return $component;
+    }
+    return false;
+  }
 }
