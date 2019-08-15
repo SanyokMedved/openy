@@ -111,6 +111,7 @@ class OpenyActivityFinderSolrBackend extends OpenyActivityFinderBackend {
     $this->time = $time;
     $this->loggerChannel = $loggerChannel;
     $this->moduleHandler = $module_handler;
+    $this->configFactory = $config_factory;
   }
 
   /**
@@ -157,7 +158,9 @@ class OpenyActivityFinderSolrBackend extends OpenyActivityFinderBackend {
    * {@inheritdoc}
    */
   public function doSearchRequest($parameters) {
-    $index = Index::load('default');
+    $config = $this->configFactory->getEditable('openy_activity_finder.settings');
+    $index_id = $config->get('backend_active_index');
+    $index = Index::load($index_id);
     $query = $index->query();
     $parse_mode = \Drupal::service('plugin.manager.search_api.parse_mode')->createInstance('direct');
     $query->getParseMode()->setConjunction('OR');

@@ -3,8 +3,11 @@
 namespace Drupal\openy_activity_finder\Form;
 
 use Drupal\Core\Cache\CacheBackendInterface;
+use Drupal\Core\Entity\EntityTypeManagerInterface;
+use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\Form\ConfigFormBase;
 use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Messenger\MessengerInterface;
 use Drupal\Core\Url;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
@@ -14,6 +17,20 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
  * Settings Form for daxko.
  */
 class SettingsForm extends ConfigFormBase {
+
+  /**
+   * The module handler service.
+   *
+   * @var \Drupal\Core\Extension\ModuleHandlerInterface
+   */
+  protected $moduleHandler;
+
+  /**
+   * The module handler service.
+   *
+   * @var \Drupal\Core\Messenger\MessengerInterface
+   */
+  protected $messenger;
 
   /**
    * Guzzle Http Client.
@@ -30,14 +47,25 @@ class SettingsForm extends ConfigFormBase {
   protected $cache;
 
   /**
-   * Constructs a new Class.
+   * @var \Drupal\Core\Entity\EntityTypeManagerInterface
+   */
+  protected $entityTypeManager;
+
+  /**
+   * Constructor
    *
    * @param \GuzzleHttp\Client $http_client
-   *   The http_client.
+   * @param CacheBackendInterface $cache
+   * @param MessengerInterface $messenger
+   * @param EntityTypeManagerInterface $entityTypeManager
+   * @param ModuleHandlerInterface $moduleHandler
    */
-  public function __construct(Client $http_client, CacheBackendInterface $cache) {
+  public function __construct(Client $http_client, CacheBackendInterface $cache, MessengerInterface $messenger, EntityTypeManagerInterface $entityTypeManager, ModuleHandlerInterface $moduleHandler) {
     $this->httpClient = $http_client;
     $this->cache = $cache;
+    $this->messenger = $messenger;
+    $this->entityTypeManager = $entityTypeManager;
+    $this->moduleHandler = $moduleHandler;
   }
 
   /**
@@ -46,7 +74,10 @@ class SettingsForm extends ConfigFormBase {
   public static function create(ContainerInterface $container) {
     return new static(
       $container->get('http_client'),
-      $container->get('cache.render')
+      $container->get('cache.render'),
+      $container->get('messenger'),
+      $container->get('entity_type.manager'),
+      $container->get('module_handler')
     );
   }
 
@@ -61,26 +92,72 @@ class SettingsForm extends ConfigFormBase {
    * {@inheritdoc}
    */
   protected function getEditableConfigNames() {
-    return [
-      'openy_activity_finder.settings',
-    ];
+    return 'openy_activity_finder.settings';
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  protected function getSearchServerName() {
+    return 'openy_activity_finder.solr_backend';
   }
 
   /**
    * {@inheritdoc}
    */
   public function buildForm(array $form, FormStateInterface $form_state) {
-    $config = $this->config('openy_activity_finder.settings');
+    $config = $this->configFactory()->getEditable($this->getEditableConfigNames());
 
     $form_state->setCached(FALSE);
 
-    $backend_options = [
-      'openy_activity_finder.solr_backend' => 'Solr Backend (local db)',
-    ];
+    $backend_options = [];
 
-    $moduleHandler = \Drupal::service('module_handler');
-    if ($moduleHandler->moduleExists('openy_daxko2')){
-      $backend_options['openy_daxko2.openy_activity_finder_backend'] = 'Daxko 2 (live API calls)';
+    if ($this->moduleHandler->moduleExists('openy_daxko2')){
+      $backend_options['openy_daxko2.openy_activity_finder_backend'] = $this->t('Daxko 2 (live API calls)');
+    }
+
+    if (!$this->moduleHandler->moduleExists('search_api')) {
+      $this->messenger->addError($this->t('Warning. You can\'t use local search. Please install Search API module and configure search index for it.'));
+    }
+    else {
+      $backend_options[$this->getSearchServerName()] = $this->t('Solr Backend (local db)');
+      $query = $this->entityTypeManager->getStorage('search_api_index')->getQuery();
+      $query->condition('status', 1);
+      $searchApiIndexOptions = $query->execute();
+
+      if (!empty($searchApiIndexOptions)) {
+        $form['backend_active_index'] = [
+          '#title' => $this->t('Select Active Index'),
+          '#type' => 'select',
+          '#options' => $searchApiIndexOptions,
+          '#default_value' => $config->get('backend_active_index') ? $config->get('backend_active_index') : 'default',
+          '#empty_value' => $this->t('Select active index'),
+          '#states' => [
+            'visible' => [
+              '[name="backend"]' => [
+                'value' => $this->getSearchServerName(),
+              ],
+            ],
+          ],
+          '#weight' => 1,
+        ];
+      }
+      else {
+        $form['backend_active_index'] = [
+          '#title' => $this->t('Select Active Index'),
+          '#type' => 'item',
+          '#description' => '<h3>' . $this->t('Warning. Module Search Api is installed, but you don\'t have any active server and index. Please Create them if you want to use local search.') . '</h3>',
+          '#weight' => 1,
+          '#states' => [
+            'visible' => [
+              '[name="backend"]' => [
+                'value' => $this->getSearchServerName(),
+              ],
+            ],
+          ],
+        ];
+        //$this->messenger->addError($this->t('Warning. Module Search Api is installed, but you don\'t have any active server and index. Please Create them if you want to use local search.'));
+      }
     }
 
     $form['backend'] = [
@@ -90,6 +167,7 @@ class SettingsForm extends ConfigFormBase {
       '#title' => $this->t('Backend for Activity Finder'),
       '#default_value' => $config->get('backend'),
       '#description' => t(''),
+      '#weight' => 0,
     ];
 
     $form['ages'] = [
@@ -97,14 +175,15 @@ class SettingsForm extends ConfigFormBase {
       '#title' => $this->t('Ages'),
       '#default_value' => $config->get('ages'),
       '#description' => t('Ages mapping. One per line. "<number of months>,<age display label>". Example: "660,55+"'),
+      '#weight' => 2,
     ];
-
 
     $form['exclude'] = [
       '#type' => 'textfield',
       '#title' => $this->t('Exclude category -- so we do not display Group Exercises'),
       '#default_value' => $config->get('exclude'),
       '#description' => t('Provide ID of the Program Subcategory to exclude. You do not need to provide this if you use Daxko. Needed only for Solr backend.'),
+      '#weight' => 3,
     ];
 
     $form['disable_search_box'] = [
@@ -112,6 +191,7 @@ class SettingsForm extends ConfigFormBase {
       '#title' => $this->t('Disable Search Box'),
       '#default_value' => $config->get('disable_search_box'),
       '#description' => t('When checked hides search text box (both for Activity Finder and Results page).'),
+      '#weight' => 3,
     ];
 
     $form['disable_spots_available'] = [
@@ -119,6 +199,7 @@ class SettingsForm extends ConfigFormBase {
       '#title' => $this->t('Disable Spots Available'),
       '#default_value' => $config->get('disable_spots_available'),
       '#description' => t('When checked disables Spots Available feature on Results page.'),
+      '#weight' => 3,
     ];
 
     $form['collapse'] = [
@@ -126,6 +207,7 @@ class SettingsForm extends ConfigFormBase {
       '#title' => $this->t('Group collapse settings.'),
       '#open' => TRUE,
       '#description' => $this->t('Please select items to show them as Expanded on program search. Default state is collapsed'),
+      '#weight' => 3,
     ];
 
     $form['collapse']['schedule'] = [
@@ -133,6 +215,7 @@ class SettingsForm extends ConfigFormBase {
       '#title' => $this->t('Schedule preferences'),
       '#open' => TRUE,
     ];
+
     $options = [
       'disabled' => $this->t('Disabled'),
       'enabled_collapsed' => $this->t('Enabled - Collapsed'),
@@ -182,9 +265,16 @@ class SettingsForm extends ConfigFormBase {
    */
   public function submitForm(array &$form, FormStateInterface $form_state) {
 
-    $config = $this->config('openy_activity_finder.settings');
+    $config = $this->configFactory()->getEditable($this->getEditableConfigNames());
 
     $config->set('backend', $form_state->getValue('backend'))->save();
+
+    if ($form_state->getValue('backend') == $this->getSearchServerName()) {
+      $config->set('backend_active_index', $form_state->getValue('backend_active_index'))->save();
+    }
+    else {
+      $config->set('backend_active_index', '')->save();
+    }
 
     $config->set('ages', $form_state->getValue('ages'))->save();
 
